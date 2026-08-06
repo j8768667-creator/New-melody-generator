@@ -1204,10 +1204,27 @@ function drawChordsLane(top){
     ctx.fillStyle = "#DCE4FA";
     ctx.font = "600 12px ui-monospace, monospace";
     ctx.fillText(chordLabel(c), x+6, top+laneH/2+4);
-    // boundary handle
-    if(i < state.chords.length){
-      ctx.fillStyle = "#6E8FE0";
-      ctx.fillRect(x+w-2, top+4, 3, laneH-8);
+
+    // Draggable boundary handle: a visible pill so it's obvious where to grab,
+    // highlighted while actively being dragged.
+    if(i < state.chords.length-1){
+      const isActive = dragState && dragState.idx===i;
+      const hx = x+w;
+      ctx.fillStyle = isActive ? "#E8A33D" : "#6E8FE0";
+      ctx.fillRect(hx-1.5, top+4, 3, laneH-8);
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(hx-7, top+laneH/2-11, 14, 22, 5) : ctx.rect(hx-7, top+laneH/2-11, 14, 22);
+      ctx.fillStyle = isActive ? "#E8A33D" : "#20242C";
+      ctx.fill();
+      ctx.strokeStyle = "#6E8FE0";
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.strokeStyle = isActive ? "#1a1305" : "#8FA8EE";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(hx-2.5, top+laneH/2-5); ctx.lineTo(hx-2.5, top+laneH/2+5);
+      ctx.moveTo(hx+2.5, top+laneH/2-5); ctx.lineTo(hx+2.5, top+laneH/2+5);
+      ctx.stroke();
     }
   });
   ctx.restore();
@@ -1292,7 +1309,7 @@ function canvasPos(evt){
   return { x: cx, y: cy };
 }
 function findBoundaryNear(xBeatPx){
-  const tolerancePx = 22;
+  const tolerancePx = 26;
   for(let i=0;i<state.chords.length-1;i++){
     const boundaryBeat = state.chords[i].startBeat + state.chords[i].lengthBeats;
     const bx = boundaryBeat*PX_PER_BEAT;
@@ -1306,15 +1323,17 @@ function onPointerDown(evt){
   const idx = findBoundaryNear(pos.x);
   if(idx<0) return;
   evt.preventDefault();
+  if(evt.pointerId!==undefined && canvas.setPointerCapture){
+    try{ canvas.setPointerCapture(evt.pointerId); }catch(e){}
+  }
   const minLen = 0.5;
   dragState = {
     idx,
     leftStart: state.chords[idx].startBeat,
-    origLeftLen: state.chords[idx].lengthBeats,
     origRightLen: state.chords[idx+1].lengthBeats,
-    combined: state.chords[idx].lengthBeats + state.chords[idx+1].lengthBeats,
     minLen
   };
+  renderGrid();
 }
 function onPointerMove(evt){
   if(!dragState) return;
@@ -1343,8 +1362,16 @@ function onPointerMove(evt){
 
   requestAnimationFrame(renderGrid);
 }
-function onPointerUp(){
-  if(dragState){ dragState=null; rebuildParts(); updateAnalysisReadout(); }
+function onPointerUp(evt){
+  if(dragState){
+    if(evt && evt.pointerId!==undefined && canvas.releasePointerCapture){
+      try{ canvas.releasePointerCapture(evt.pointerId); }catch(e){}
+    }
+    dragState=null;
+    rebuildParts();
+    updateAnalysisReadout();
+    renderGrid();
+  }
 }
 function rescaleEventsInRange(events, oldStart, oldEnd, newStart, newEnd){
   const oldSpan = Math.max(1e-6, oldEnd-oldStart);
@@ -1358,12 +1385,14 @@ function rescaleEventsInRange(events, oldStart, oldEnd, newStart, newEnd){
     }
   });
 }
+// Pointer Events alone cover mouse, touch and pen on iPadOS Safari — adding a
+// parallel touch-event listener set caused each drag frame to be processed
+// twice (once per event system), corrupting the resize math. Pointer-only
+// fixes that.
 canvas.addEventListener("pointerdown", onPointerDown);
 canvas.addEventListener("pointermove", onPointerMove);
 window.addEventListener("pointerup", onPointerUp);
-canvas.addEventListener("touchstart", onPointerDown, {passive:false});
-canvas.addEventListener("touchmove", onPointerMove, {passive:false});
-window.addEventListener("touchend", onPointerUp);
+window.addEventListener("pointercancel", onPointerUp);
 
 window.addEventListener("resize", ()=>renderGrid());
 
@@ -1374,16 +1403,18 @@ let masterVol, chordVol, melodyVol, drumVol;
 let chordSynth, melodySynth;
 let drumSynths = {};
 let chordPart, melodyPart, drumPart;
-let panicGain, limiter;
-let chordFilter, melodyFilter, hatFilter;
+let panicGain, limiter, compressor;
+let chordFilter, melodyFilter, hatClosedFilter, hatOpenFilter;
 
 function buildAudioGraph(){
-  // Master chain: per-lane volume -> master volume -> panic gate (instant
-  // silence on stop/pause) -> limiter (headroom so summed voices don't clip
-  // and turn harsh) -> speakers.
-  limiter = new Tone.Limiter(-2).toDestination();
+  // Master chain: per-lane volume -> master volume -> glue compressor (keeps
+  // simultaneous hits from piling up into a hot peak) -> panic gate (instant
+  // silence on stop/pause) -> brick-wall limiter (final safety net against
+  // clipping) -> speakers.
+  limiter = new Tone.Limiter(-1).toDestination();
   panicGain = new Tone.Gain(1).connect(limiter);
-  masterVol = new Tone.Volume(pctToDb(state.masterVolPct)).connect(panicGain);
+  compressor = new Tone.Compressor({ threshold:-18, ratio:3.5, attack:0.004, release:0.2 }).connect(panicGain);
+  masterVol = new Tone.Volume(pctToDb(state.masterVolPct)).connect(compressor);
   chordVol = new Tone.Volume(0).connect(masterVol);
   melodyVol = new Tone.Volume(0).connect(masterVol);
   drumVol = new Tone.Volume(0).connect(masterVol);
@@ -1391,32 +1422,39 @@ function buildAudioGraph(){
   // Gentle lowpass filters tame the harsh upper harmonics of the raw
   // waveforms/noise sources so playback doesn't read as shrill/tinny,
   // especially on small iPad speakers.
-  chordFilter = new Tone.Filter(2200, "lowpass").connect(chordVol);
-  melodyFilter = new Tone.Filter(3200, "lowpass").connect(melodyVol);
-  hatFilter = new Tone.Filter(8500, "lowpass").connect(drumVol);
+  chordFilter = new Tone.Filter(2000, "lowpass", -24).connect(chordVol);
+  melodyFilter = new Tone.Filter(2600, "lowpass", -24).connect(melodyVol);
+  hatClosedFilter = new Tone.Filter({ type:"bandpass", frequency:8200, Q:0.7 }).connect(drumVol);
+  hatOpenFilter = new Tone.Filter({ type:"bandpass", frequency:7200, Q:0.6 }).connect(drumVol);
 
   chordSynth = new Tone.PolySynth(Tone.Synth, {
     oscillator:{ type:"triangle" },
-    envelope:{ attack:0.02, decay:0.25, sustain:0.55, release:0.5 }
+    envelope:{ attack:0.02, decay:0.25, sustain:0.5, release:0.45 }
   }).connect(chordFilter);
-  chordSynth.set({ volume:-11 });
+  chordSynth.set({ volume:-14 });
 
-  melodySynth = new Tone.Synth({
+  // MonoSynth gives melody a shaped, closing filter envelope instead of a raw
+  // sawtooth blasting full-bandwidth on every note — much less shrill.
+  melodySynth = new Tone.MonoSynth({
     oscillator:{ type:"sawtooth" },
-    envelope:{ attack:0.006, decay:0.12, sustain:0.4, release:0.15 }
+    envelope:{ attack:0.006, decay:0.14, sustain:0.35, release:0.12 },
+    filter:{ type:"lowpass", rolloff:-24, Q:1 },
+    filterEnvelope:{ attack:0.008, decay:0.2, sustain:0.25, release:0.15, baseFrequency:400, octaves:3.2 }
   }).connect(melodyFilter);
-  melodySynth.set({ volume:-9 });
+  melodySynth.set({ volume:-11 });
 
   drumSynths.kick = new Tone.MembraneSynth({ pitchDecay:0.045, octaves:6, envelope:{attack:0.001,decay:0.35,sustain:0} }).connect(drumVol);
-  drumSynths.kick.volume.value = -2;
-  drumSynths.snare = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.14,sustain:0} }).connect(drumVol);
-  drumSynths.snare.volume.value = -8;
-  drumSynths.hatClosed = new Tone.MetalSynth({ envelope:{attack:0.001,decay:0.05,release:0.01}, harmonicity:3.4, resonance:2800, octaves:1.0 }).connect(hatFilter);
-  drumSynths.hatClosed.volume.value = -16;
-  drumSynths.hatOpen = new Tone.MetalSynth({ envelope:{attack:0.001,decay:0.28,release:0.04}, harmonicity:3.4, resonance:2400, octaves:1.2 }).connect(hatFilter);
-  drumSynths.hatOpen.volume.value = -16;
+  drumSynths.kick.volume.value = -5;
+  drumSynths.snare = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.13,sustain:0} }).connect(drumVol);
+  drumSynths.snare.volume.value = -12;
+  // Filtered noise instead of MetalSynth: a realistic hat sound rather than
+  // the piercing bell-like clang MetalSynth produces at full bandwidth.
+  drumSynths.hatClosed = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.045,sustain:0} }).connect(hatClosedFilter);
+  drumSynths.hatClosed.volume.value = -20;
+  drumSynths.hatOpen = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.22,sustain:0} }).connect(hatOpenFilter);
+  drumSynths.hatOpen.volume.value = -20;
   drumSynths.perc = new Tone.MembraneSynth({ pitchDecay:0.02, octaves:3, envelope:{attack:0.001,decay:0.2,sustain:0} }).connect(drumVol);
-  drumSynths.perc.volume.value = -9;
+  drumSynths.perc.volume.value = -12;
 }
 
 /* Immediately silences every currently-sounding voice (releases the synths'
@@ -1439,7 +1477,7 @@ function panicSilence(){
 }
 function pctToDb(pct){
   if(pct<=0) return -Infinity;
-  return -40 + (pct/100)*40;
+  return -40 + (pct/100)*37; // ceiling of -3dB at 100% leaves headroom for the limiter
 }
 
 function rebuildParts(){
