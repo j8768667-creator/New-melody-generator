@@ -79,7 +79,6 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#1a1305;
       <div id="audioStatus" class="flex items-center gap-2 mono text-[11px] px-2" style="color:var(--text-dim)">
         <span id="audioDot" class="pulse-dot"></span><span id="audioStatusText">Audio locked</span>
       </div>
-      <button id="btnActivate" class="btn btn-accent">Activate Audio System</button>
     </div>
   </header>
 
@@ -403,8 +402,20 @@ async function handleMidiFile(file){
       tsNum = midi.header.timeSignatures[0].timeSignature[0];
       tsDen = midi.header.timeSignatures[0].timeSignature[1];
     }
-    state.bpm = Math.round(bpm);
+    // Apply style-appropriate BPM instead of keeping source BPM
+    const styleCfg = STYLES[state.style] || STYLES.pop;
+    if(styleCfg.bpmRange){
+      state.bpm = Math.round((styleCfg.bpmRange[0] + styleCfg.bpmRange[1]) / 2);
+    } else {
+      state.bpm = Math.round(bpm);
+    }
     state.ts.num = tsNum; state.ts.den = tsDen;
+    // Apply style swing too
+    const sw = styleCfg.drums ? (styleCfg.drums.swingDefault || 0) : 0;
+    state.swing = sw;
+    document.getElementById("sliderSwing").value = sw;
+    document.getElementById("swingVal").textContent = sw + "%";
+    if(state.audioReady){ Tone.Transport.swing = sw/100; }
     document.getElementById("inputBpm").value = state.bpm;
     document.getElementById("selectTsNum").value = String(tsNum);
     document.getElementById("selectTsDen").value = String(tsDen);
@@ -478,6 +489,7 @@ const STYLES = {
   hiphop:{
     label:"Hip-Hop / Rap",
     desc:"Dark minimalist minor loop, hard 808 kick/snare with loose swing, percussive monotone melody flow.",
+    bpmRange:[80,95], swingDefault:35,
     chord:{voicing:"minimal",octave:3,sustain:true},
     melody:{subdivision:0.25,density:0.62,legato:0.55,leapChance:0.12,phraseLen:6,restChance:0.35,regLow:48,regHigh:60,accent:1.35,microMs:4,quantStrength:0.55,repeatProb:0.65,transposeProb:0.10,varyProb:0.25,phraseBars:1},
     drums:{kick:b16("x...x...x.x....."),snare:b16("....x.......x.x."),hatClosed:b16("x.x.x.x.x.x.x.x."),hatOpen:b16("................"),perc:b16("................"),swingDefault:35,accentBeat1:1.4}
@@ -485,6 +497,7 @@ const STYLES = {
   pop:{
     label:"Pop",
     desc:"I-V-vi-IV comping, driving four-on-the-floor/backbeat, tight quantize, step-wise earworm melody.",
+    bpmRange:[100,128], swingDefault:0,
     chord:{voicing:"triad",octave:4,sustain:true},
     melody:{subdivision:0.5,density:0.72,legato:0.85,leapChance:0.22,phraseLen:8,restChance:0.2,regLow:60,regHigh:72,accent:1.25,microMs:2,quantStrength:0.95,repeatProb:0.50,transposeProb:0.25,varyProb:0.25,phraseBars:2},
     drums:{kick:b16("x...x...x...x..."),snare:b16("....x.......x..."),hatClosed:b16("x.x.x.x.x.x.x.x."),hatOpen:b16("...............x"),perc:b16("................"),swingDefault:0,accentBeat1:1.3}
@@ -492,6 +505,7 @@ const STYLES = {
   rock:{
     label:"Rock",
     desc:"Root-fifth power chords with modal borrowing, aggressive dragged drums, pentatonic soaring leaps.",
+    bpmRange:[110,140], swingDefault:8,
     chord:{voicing:"power",octave:3,sustain:true},
     melody:{subdivision:0.5,density:0.66,legato:0.9,leapChance:0.48,phraseLen:6,restChance:0.25,regLow:55,regHigh:79,accent:1.3,microMs:6,quantStrength:0.7,drag:0.012,repeatProb:0.40,transposeProb:0.30,varyProb:0.30,phraseBars:2},
     drums:{kick:b16("x..x..x.x..x...."),snare:b16("....x.......x..."),hatClosed:b16("x.x.x.x.x.x.x.x."),hatOpen:b16("..............x."),perc:b16("................"),swingDefault:8,accentBeat1:1.45,drag:0.014}
@@ -499,6 +513,7 @@ const STYLES = {
   country:{
     label:"Country",
     desc:"Clean I-IV-V major triads, steady acoustic drums, step-wise phrasing with slide entries.",
+    bpmRange:[90,120], swingDefault:5,
     chord:{voicing:"triad",octave:4,sustain:true},
     melody:{subdivision:0.5,density:0.6,legato:0.75,leapChance:0.15,phraseLen:7,restChance:0.28,regLow:57,regHigh:69,accent:1.2,microMs:3,quantStrength:0.85,repeatProb:0.45,transposeProb:0.25,varyProb:0.30,phraseBars:2},
     drums:{kick:b16("x.......x......."),snare:b16("....x.......x..."),hatClosed:b16("x.x.x.x.x.x.x.x."),hatOpen:b16("................"),perc:b16("................"),swingDefault:5,accentBeat1:1.2}
@@ -506,6 +521,7 @@ const STYLES = {
   edm:{
     label:"EDM",
     desc:"Big rhythmic synth pads with rising tension, high-energy dance beat, fast arpeggiated leads locked to clock.",
+    bpmRange:[124,140], swingDefault:0,
     chord:{voicing:"extended",octave:4,sustain:false},
     melody:{subdivision:0.25,density:0.85,legato:0.6,leapChance:0.3,phraseLen:16,restChance:0.05,regLow:64,regHigh:84,accent:1.15,microMs:1,quantStrength:1.0,arp:true},
     drums:{kick:b16("x...x...x...x..."),snare:b16("....x.......x..."),hatClosed:b16("x.x.x.x.x.x.x.x."),hatOpen:b16("..x...x...x...x."),perc:b16("..x...x...x...x."),swingDefault:0,accentBeat1:1.2}
@@ -513,6 +529,7 @@ const STYLES = {
   latin:{
     label:"Latin",
     desc:"Syncopated i-iv-V acoustic vamp, clave/montuno percussion, staccato syncopated melody around the pulse.",
+    bpmRange:[100,130], swingDefault:10,
     chord:{voicing:"triad",octave:4,sustain:false},
     melody:{subdivision:0.25,density:0.7,legato:0.35,leapChance:0.28,phraseLen:5,restChance:0.3,regLow:60,regHigh:76,accent:1.3,microMs:3,quantStrength:0.75,staccato:true,repeatProb:0.50,transposeProb:0.20,varyProb:0.30,phraseBars:1},
     drums:{kick:b16("x..x..x.x......."),snare:b16("..x...x...x..x.."),hatClosed:b16("x.x.x.x.x.x.x.x."),hatOpen:b16("................"),perc:b16("x.x.x.x.x.x.x.x."),swingDefault:10,accentBeat1:1.25}
@@ -520,6 +537,7 @@ const STYLES = {
   cinematic:{
     label:"Cinematic",
     desc:"Slow sweeping modal shifts, sparse epic orchestral hits, expressive motif-driven legato phrases.",
+    bpmRange:[60,80], swingDefault:0,
     chord:{voicing:"extended",octave:3,sustain:true},
     melody:{subdivision:1,density:0.45,legato:1.6,leapChance:0.2,phraseLen:4,restChance:0.4,regLow:55,regHigh:79,accent:1.1,microMs:8,quantStrength:0.3,repeatProb:0.35,transposeProb:0.35,varyProb:0.30,phraseBars:4},
     drums:{kick:b16("x..............."),snare:b16("................"),hatClosed:b16("................"),hatOpen:b16("................"),perc:b16("........x......."),swingDefault:0,accentBeat1:1.1,sparse:true}
@@ -527,6 +545,7 @@ const STYLES = {
   rnb:{
     label:"R&B / Soul",
     desc:"Jazz-extended 7th/9th/11th harmonies, laid-back neo-soul pocket, ornamental blues-note vocal runs.",
+    bpmRange:[70,95], swingDefault:22,
     chord:{voicing:"extended",octave:4,sustain:true},
     melody:{subdivision:0.25,density:0.68,legato:1.05,leapChance:0.32,phraseLen:6,restChance:0.3,regLow:60,regHigh:74,accent:1.15,microMs:9,quantStrength:0.45,blueNotes:true,drag:0.02,repeatProb:0.40,transposeProb:0.25,varyProb:0.35,phraseBars:2},
     drums:{kick:b16("x.....x...x....."),snare:b16("....x.......x..."),hatClosed:b16("x.x.x.x.x.x.x.x."),hatOpen:b16("................"),perc:b16("................"),swingDefault:22,accentBeat1:1.1,drag:0.02}
@@ -534,6 +553,7 @@ const STYLES = {
   ambient:{
     label:"Ambient",
     desc:"Ultra-slow evolving drone chords with blurred resolution, absent/textural drums, fragmented distant melody.",
+    bpmRange:[50,70], swingDefault:0,
     chord:{voicing:"drone",octave:3,sustain:true},
     melody:{subdivision:2,density:0.22,legato:2.2,leapChance:0.35,phraseLen:2,restChance:0.6,regLow:60,regHigh:88,accent:1.0,microMs:15,quantStrength:0.1},
     drums:{kick:b16("................"),snare:b16("................"),hatClosed:b16("................"),hatOpen:b16("................"),perc:b16("...x........x..."),swingDefault:0,accentBeat1:1.0,sparse:true}
@@ -541,6 +561,7 @@ const STYLES = {
   classical:{
     label:"Classical",
     desc:"Traditional functional harmony and voice-leading, absent/timpani percussion, intricate counterpoint themes.",
+    bpmRange:[60,100], swingDefault:0,
     chord:{voicing:"triad",octave:4,sustain:true},
     melody:{subdivision:0.5,density:0.75,legato:1.0,leapChance:0.25,phraseLen:10,restChance:0.18,regLow:55,regHigh:81,accent:1.15,microMs:2,quantStrength:0.9,counterpoint:true,repeatProb:0.40,transposeProb:0.35,varyProb:0.25,phraseBars:4},
     drums:{kick:b16("................"),snare:b16("................"),hatClosed:b16("................"),hatOpen:b16("................"),perc:b16("x.......x......."),swingDefault:0,accentBeat1:1.0,sparse:true}
@@ -825,9 +846,17 @@ function runGenerate(){
 }
 
 function runRegenerate(){
+  if(!state.chords.length){
+    // Nothing generated yet — run full generate instead
+    runGenerate();
+    return;
+  }
   readSettingsFromUI();
+  // Re-pad chords in case bars changed
+  state.chords = padChordsToLength(state.chordCore, totalBeats());
   state.melody = generateMelody();
   state.drums = generateDrums();
+  document.getElementById("btnExport").disabled = false;
   updateAnalysisReadout();
   renderGrid();
   if(state.audioReady) rebuildParts();
@@ -918,7 +947,9 @@ function drawChordsLane(top){
     ctx.fillStyle = "#DCE4FA";
     ctx.font = "600 12px ui-monospace, monospace";
     ctx.fillText(chordLabel(c), x+6, top+laneH/2+4);
-    // Drag handle
+    // Drag handle (wider for touch)
+    ctx.fillStyle = "rgba(110,143,224,0.3)";
+    ctx.fillRect(x+w-12, top+4, 12, laneH-8);
     ctx.fillStyle = "#6E8FE0";
     ctx.fillRect(x+w-2, top+4, 3, laneH-8);
   });
@@ -989,10 +1020,11 @@ function canvasPos(evt){
   return {x: cx, y: cy};
 }
 function findBoundaryNear(xPx){
+  const tolerance = 30; // wider touch zone for iPad
   for(let i=0; i<state.chords.length-1; i++){
     const boundaryBeat = state.chords[i].startBeat + state.chords[i].lengthBeats;
     const bx = boundaryBeat*PX_PER_BEAT;
-    if(Math.abs(bx - xPx) <= 22) return i;
+    if(Math.abs(bx - xPx) <= tolerance) return i;
   }
   return -1;
 }
@@ -1092,6 +1124,11 @@ function buildAudioGraph(){
 
 function panicSilence(){
   if(!state.audioReady) return;
+  // Cancel all scheduled events immediately
+  Tone.Transport.cancel(0);
+  // Dispose existing parts so their callbacks can't fire
+  [chordPart, melodyPart, drumPart].forEach(p=>{ if(p){ p.stop(); p.dispose(); } });
+  chordPart = null; melodyPart = null; drumPart = null;
   const now = Tone.now();
   try{ chordSynth.releaseAll(now); }catch(e){}
   [melodySynth, drumSynths.kick, drumSynths.snare, drumSynths.hatClosed, drumSynths.hatOpen, drumSynths.perc].forEach(s=>{
@@ -1100,9 +1137,8 @@ function panicSilence(){
   });
   if(panicGain){
     panicGain.gain.cancelScheduledValues(now);
-    panicGain.gain.setValueAtTime(panicGain.gain.value, now);
-    panicGain.gain.linearRampToValueAtTime(0.0001, now+0.03);
-    panicGain.gain.setValueAtTime(1, now+0.07);
+    panicGain.gain.setValueAtTime(0.0001, now);
+    panicGain.gain.setValueAtTime(1, now+0.08);
   }
 }
 
@@ -1195,35 +1231,49 @@ function exportMidi(){
 // ============================================================
 // UI WIRING
 // ============================================================
-document.getElementById("btnActivate").addEventListener("click", async ()=>{
+// Auto-activate audio on first user interaction (no splash screen)
+let audioActivated = false;
+async function autoActivateAudio(){
+  if(audioActivated) return;
+  audioActivated = true;
   try{
     await Tone.start();
     buildAudioGraph();
     state.audioReady = true;
     document.getElementById("audioDot").classList.add("live");
-    document.getElementById("audioStatusText").textContent = "Audio unlocked";
-    document.getElementById("btnActivate").disabled = true;
-    document.getElementById("btnActivate").textContent = "Audio System Active";
+    document.getElementById("audioStatusText").textContent = "Audio ready";
     ["btnPlay","btnPause","btnStop"].forEach(id=>document.getElementById(id).disabled=false);
     Tone.Transport.swing = state.swing/100;
     Tone.Transport.swingSubdivision = "8n";
     if(state.chords.length) rebuildParts();
-  }catch(e){ alert("Audio activation failed: "+e.message); }
-});
+  }catch(e){ audioActivated = false; }
+}
+document.addEventListener("pointerdown", autoActivateAudio, {once:false});
+document.addEventListener("keydown", autoActivateAudio, {once:false});
 
-document.getElementById("btnPlay").addEventListener("click", ()=>{
+document.getElementById("btnPlay").addEventListener("click", async ()=>{
+  if(!state.audioReady) await autoActivateAudio();
   if(!state.audioReady) return;
-  if(!chordPart && state.chords.length) rebuildParts();
+  if(!state.chords.length){ alert("Generate a composition first."); return; }
+  if(!chordPart) rebuildParts();
   if(!chordPart) return;
   Tone.Transport.start();
   state.playing = true;
   startPlayheadTracking();
 });
 document.getElementById("btnPause").addEventListener("click", ()=>{
-  Tone.Transport.pause(); panicSilence(); state.playing = false;
+  Tone.Transport.pause();
+  state.playing = false;
+  panicSilence();
 });
 document.getElementById("btnStop").addEventListener("click", ()=>{
-  Tone.Transport.stop(); panicSilence(); state.playing = false; playheadBeat = -1; renderGrid();
+  Tone.Transport.stop();
+  state.playing = false;
+  playheadBeat = -1;
+  panicSilence();
+  // Rebuild parts for next play
+  if(state.chords.length) rebuildParts();
+  renderGrid();
 });
 
 document.getElementById("inputBpm").addEventListener("change", e=>{
@@ -1282,11 +1332,18 @@ document.getElementById("selectStyle").addEventListener("change", e=>{
   state.style = e.target.value;
   const cfg = STYLES[state.style];
   document.getElementById("styleDesc").textContent = cfg.desc;
-  const sw = cfg.drums.swingDefault;
+  const sw = cfg.drums.swingDefault || 0;
   document.getElementById("sliderSwing").value = sw;
   state.swing = sw;
   document.getElementById("swingVal").textContent = sw+"%";
   if(state.audioReady){ Tone.Transport.swing = sw/100; }
+  // Apply style BPM
+  if(cfg.bpmRange){
+    state.bpm = Math.round((cfg.bpmRange[0] + cfg.bpmRange[1]) / 2);
+    document.getElementById("inputBpm").value = state.bpm;
+    if(state.audioReady){ Tone.Transport.bpm.value = state.bpm; rebuildParts(); }
+    updateAnalysisReadout();
+  }
 });
 
 document.getElementById("btnGenerate").addEventListener("click", runGenerate);
