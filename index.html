@@ -747,6 +747,20 @@ const STYLES = {
 function b16(str){ return str.split("").map(c=>c==="x"); }
 function bars16(active){ return { active, pattern:new Array(16).fill(active) }; }
 
+// Phrase/motif behaviour per style — drives repetition, sequencing and thematic
+// variation so melodies read as intentional phrases rather than a random walk.
+const MOTIF_DEFAULTS = {
+  hiphop:    { phraseBars:1, repeatProb:0.65, transposeProb:0.10, varyProb:0.25 },
+  pop:       { phraseBars:2, repeatProb:0.50, transposeProb:0.25, varyProb:0.25 },
+  rock:      { phraseBars:2, repeatProb:0.40, transposeProb:0.30, varyProb:0.30 },
+  country:   { phraseBars:2, repeatProb:0.45, transposeProb:0.25, varyProb:0.30 },
+  latin:     { phraseBars:1, repeatProb:0.50, transposeProb:0.20, varyProb:0.30 },
+  cinematic: { phraseBars:4, repeatProb:0.35, transposeProb:0.35, varyProb:0.30 },
+  rnb:       { phraseBars:2, repeatProb:0.40, transposeProb:0.25, varyProb:0.35 },
+  classical: { phraseBars:4, repeatProb:0.40, transposeProb:0.35, varyProb:0.25 }
+};
+Object.keys(MOTIF_DEFAULTS).forEach(k=>{ Object.assign(STYLES[k].melody, MOTIF_DEFAULTS[k]); });
+
 /* ============================================================
    GENERATION ENGINE
    ============================================================ */
@@ -831,69 +845,200 @@ function humanVel(base, mult, downbeat){
   return clamp(v, 0.05, 1);
 }
 
-/* ---- Melody generation ---- */
+/* ---- Melody generation ----
+   Pop/rock/country/latin/cinematic/rnb/classical/hip-hop build phrases from a
+   short reusable motif (contour + rhythm), repeated, sequenced to the chord,
+   or lightly varied — this is what makes a line feel like a written phrase
+   rather than a random walk. EDM uses a locked arpeggiator; Ambient uses
+   sparse fragments/clusters, per the style brief. */
 function generateMelody(){
   const p = STYLES[state.style].melody;
-  const events = [];
-  const scalePcs = scaleForKey();
-  let nextFree = 0;
-  let phraseCount = 0;
-  let prevMidi = null;
+  if(state.style === "edm") return generateMelodyArp(p);
+  if(state.style === "ambient") return generateMelodyAmbient(p);
+  return generateMelodyMotif(p);
+}
 
-  let t = 0;
+function buildScaleMidis(regLow, regHigh){
+  const scalePcs = scaleForKey();
+  const out = [];
+  for(let m=regLow-12; m<=regHigh+12; m++){
+    if(scalePcs.includes(((m%12)+12)%12)) out.push(m);
+  }
+  return out;
+}
+
+function generateMotif(p, phraseBeats){
+  const totalSteps = Math.max(2, Math.round(phraseBeats / p.subdivision));
+  const contour = choice(["arch","rise","fall","valley","wave","static"]);
+  const steps = [];
+  for(let i=0;i<totalSteps;i++){
+    const frac = totalSteps>1 ? i/(totalSteps-1) : 0;
+    let bias;
+    switch(contour){
+      case "arch":   bias = Math.sin(frac*Math.PI); break;
+      case "rise":   bias = frac; break;
+      case "fall":   bias = 1-frac; break;
+      case "valley": bias = 1-Math.sin(frac*Math.PI); break;
+      case "wave":   bias = Math.sin(frac*Math.PI*2)*0.5+0.5; break;
+      default:       bias = 0.5;
+    }
+    const offset = Math.round((bias-0.5) * (4 + p.leapChance*6));
+    const stepsPerBeat = Math.max(1, Math.round(1/p.subdivision));
+    const strong = (i % stepsPerBeat) === 0;
+    let play = i===0 ? true : Math.random() < p.density;
+    steps.push({ i, play, offset, strong });
+  }
+  return { contour, steps };
+}
+
+function cloneMotif(m){
+  return { contour:m.contour, steps:m.steps.map(s=>({...s})) };
+}
+
+function instantiateMotif(motif, phraseStart, p, scaleMidis, anchorRef){
+  const events = [];
   const total = totalBeats();
-  while(t < total - 1e-6){
+  let lastMidi = null;
+  motif.steps.forEach(st=>{
+    const beat = phraseStart + st.i*p.subdivision;
+    if(beat >= total - 1e-6 || !st.play) return;
+
+    let idx = clamp(anchorRef.idx + st.offset, 0, scaleMidis.length-1);
+    let midiNote = scaleMidis[idx];
+    const chord = chordAtBeat(beat);
+    const beatInBar = beat % beatsPerBar();
+    const isDownbeat = Math.abs(beatInBar) < 1e-6;
+
+    // Snap to the nearest chord tone on strong beats — keeps the motif
+    // harmonically anchored to the underlying changes as it repeats/sequences.
+    if(chord && (isDownbeat || st.strong)){
+      const tones = chordToneMidis(chord, 5);
+      let best = midiNote, bd = 999;
+      tones.forEach(t=>{
+        [t-12,t,t+12].forEach(tt=>{
+          const d = Math.abs(tt-midiNote);
+          if(d<bd){ bd=d; best=tt; }
+        });
+      });
+      midiNote = best;
+    }
+    if(p.blueNotes && Math.random() < 0.18) midiNote -= choice([3,10]);
+    midiNote = clamp(midiNote, p.regLow, p.regHigh);
+    if(p.counterpoint && lastMidi!==null && Math.abs(midiNote-lastMidi) > 9){
+      midiNote = nearestScaleMidi(Math.round((midiNote+lastMidi)/2), scaleForKey());
+    }
+
+    let dur = p.subdivision * p.legato;
+    if(p.staccato) dur *= 0.45;
+    dur = Math.max(0.06, dur);
+
+    const microBeats = (rnd(-p.microMs, p.microMs)/1000) / secPerBeat();
+    const dragOffset = p.drag ? p.drag/secPerBeat() : 0;
+    const startBeat = Math.max(0, beat*p.quantStrength + beat*(1-p.quantStrength) + microBeats + dragOffset);
+
+    events.push({
+      midi: Math.round(midiNote),
+      startBeat,
+      lengthBeats: dur,
+      velocity: humanVel(0.6, isDownbeat?p.accent:(st.strong?1:0.75), isDownbeat)
+    });
+    lastMidi = midiNote;
+    anchorRef.idx = idx;
+  });
+  if(lastMidi!==null){
+    let bi=anchorRef.idx, bd=999;
+    scaleMidis.forEach((m,ix)=>{ const d=Math.abs(m-lastMidi); if(d<bd){bd=d; bi=ix;} });
+    anchorRef.idx = bi;
+  }
+  return events;
+}
+
+function generateMelodyMotif(p){
+  const scaleMidis = buildScaleMidis(p.regLow, p.regHigh);
+  const phraseBeats = (p.phraseBars||2) * beatsPerBar();
+  const anchorRef = { idx: Math.floor(scaleMidis.length/2) };
+  const events = [];
+  let lastMotif = null;
+  let phraseStart = 0;
+  const total = totalBeats();
+
+  while(phraseStart < total - 1e-6){
+    let motif;
+    const r = Math.random();
+    const repeatProb = p.repeatProb!==undefined ? p.repeatProb : 0.4;
+    const transposeProb = p.transposeProb!==undefined ? p.transposeProb : 0.25;
+
+    if(lastMotif && r < repeatProb){
+      motif = lastMotif;
+    } else if(lastMotif && r < repeatProb+transposeProb){
+      motif = lastMotif;
+      anchorRef.idx = clamp(anchorRef.idx + choice([-3,-2,-1,1,2,3]), 0, scaleMidis.length-1);
+    } else {
+      motif = generateMotif(p, phraseBeats);
+    }
+    if(lastMotif===motif && Math.random() < (p.varyProb!==undefined?p.varyProb:0.3)){
+      motif = cloneMotif(motif);
+      const idx = Math.floor(Math.random()*motif.steps.length);
+      motif.steps[idx].offset += choice([-1,1]);
+      motif.steps[idx].play = Math.random() < (p.density+0.15);
+    }
+    events.push(...instantiateMotif(motif, phraseStart, p, scaleMidis, anchorRef));
+    lastMotif = motif;
+    phraseStart += phraseBeats;
+  }
+  return events;
+}
+
+/* EDM: fast arpeggiated lead locked firmly to the grid. */
+function generateMelodyArp(p){
+  const events = [];
+  const stepBeats = p.subdivision;
+  const total = totalBeats();
+  let dirState = 1, idxState = 0;
+  for(let t=0; t<total-1e-6; t+=stepBeats){
     const chord = chordAtBeat(t);
+    if(!chord || Math.random() >= p.density) continue;
+    const tones = chordToneMidis(chord,5).concat(chordToneMidis(chord,6));
+    idxState = ((idxState+dirState)%tones.length+tones.length)%tones.length;
+    if(Math.random() < 0.15) dirState *= -1;
+    const midiNote = clamp(tones[idxState], p.regLow, p.regHigh);
     const beatInBar = t % beatsPerBar();
     const isDownbeat = Math.abs(beatInBar) < 1e-6;
-    const isStrongBeat = Math.abs(beatInBar % 1) < 1e-6;
+    const microBeats = (rnd(-p.microMs, p.microMs)/1000) / secPerBeat();
+    events.push({
+      midi: midiNote,
+      startBeat: Math.max(0, t+microBeats),
+      lengthBeats: Math.max(0.06, stepBeats*p.legato),
+      velocity: humanVel(0.6, isDownbeat?p.accent:0.8, isDownbeat)
+    });
+  }
+  return events;
+}
 
-    let play = Math.random() < p.density;
-    if(phraseCount >= p.phraseLen && Math.random() < p.restChance){
-      play = false; phraseCount = 0;
-    }
-    if(t < nextFree - 1e-6) play = false;
-
-    if(play && chord){
-      const tones = chordToneMidis(chord, 5);
-      let target;
-      if(prevMidi!==null && Math.random() > p.leapChance){
-        // stepwise: move by 1-2 scale steps from prevMidi
-        const dir = Math.random()<0.5 ? -1 : 1;
-        const stepSize = choice([1,2]);
-        target = nearestScaleMidi(prevMidi + dir*stepSize, scalePcs);
-      } else if(p.arp){
-        target = choice(tones);
-      } else {
-        target = choice(tones) + choice([-12,0,0,12]);
-      }
-      if(p.blueNotes && Math.random()<0.22){
-        target -= choice([3,10]) - 0; // approximate flatten 3rd/7th shift
-      }
-      target = clamp(target, p.regLow, p.regHigh);
-      if(p.counterpoint && prevMidi!==null && Math.abs(target-prevMidi) > 9){
-        target = nearestScaleMidi((target+prevMidi)/2, scalePcs);
-      }
-
-      let dur = p.subdivision * p.legato;
-      if(p.staccato) dur *= 0.45;
-      dur = Math.max(0.06, dur);
-
-      const microBeats = (rnd(-p.microMs, p.microMs)/1000) / secPerBeat();
-      const quantizedStart = t*p.quantStrength + t*(1-p.quantStrength) + microBeats;
-      const dragOffset = p.drag ? p.drag/secPerBeat() : 0;
-
-      events.push({
-        midi: Math.round(target),
-        startBeat: Math.max(0, quantizedStart + dragOffset),
-        lengthBeats: dur,
-        velocity: humanVel(0.6, isDownbeat?p.accent:(isStrongBeat?1:0.75), isDownbeat)
-      });
-      prevMidi = target;
-      nextFree = t + p.subdivision;
-      phraseCount++;
-    }
-    t += p.subdivision;
+/* Ambient: fragmented, sparse, distant clusters — negative space over density. */
+function generateMelodyAmbient(p){
+  const events = [];
+  const scalePcs = scaleForKey();
+  const total = totalBeats();
+  let prevMidi = null, nextFree = 0;
+  for(let t=0; t<total-1e-6; t+=p.subdivision){
+    if(t < nextFree - 1e-6 || Math.random() >= p.density) continue;
+    const chord = chordAtBeat(t);
+    const tones = chord ? chordToneMidis(chord,5) : [60,64,67];
+    let target = (prevMidi!==null && Math.random()<0.5)
+      ? nearestScaleMidi(prevMidi + choice([-2,-1,1,2]), scalePcs)
+      : choice(tones) + choice([-12,0,12]);
+    target = clamp(target, p.regLow, p.regHigh);
+    const dur = Math.max(0.3, p.subdivision*p.legato*rnd(0.7,1.3));
+    const microBeats = (rnd(-p.microMs, p.microMs)/1000) / secPerBeat();
+    events.push({
+      midi: Math.round(target),
+      startBeat: Math.max(0, t+microBeats),
+      lengthBeats: dur,
+      velocity: humanVel(0.45, 1, false)
+    });
+    prevMidi = target;
+    nextFree = t + dur*rnd(1.2,2.2);
   }
   return events;
 }
@@ -1229,30 +1374,68 @@ let masterVol, chordVol, melodyVol, drumVol;
 let chordSynth, melodySynth;
 let drumSynths = {};
 let chordPart, melodyPart, drumPart;
+let panicGain, limiter;
+let chordFilter, melodyFilter, hatFilter;
 
 function buildAudioGraph(){
-  masterVol = new Tone.Volume(pctToDb(state.masterVolPct)).toDestination();
+  // Master chain: per-lane volume -> master volume -> panic gate (instant
+  // silence on stop/pause) -> limiter (headroom so summed voices don't clip
+  // and turn harsh) -> speakers.
+  limiter = new Tone.Limiter(-2).toDestination();
+  panicGain = new Tone.Gain(1).connect(limiter);
+  masterVol = new Tone.Volume(pctToDb(state.masterVolPct)).connect(panicGain);
   chordVol = new Tone.Volume(0).connect(masterVol);
   melodyVol = new Tone.Volume(0).connect(masterVol);
   drumVol = new Tone.Volume(0).connect(masterVol);
 
+  // Gentle lowpass filters tame the harsh upper harmonics of the raw
+  // waveforms/noise sources so playback doesn't read as shrill/tinny,
+  // especially on small iPad speakers.
+  chordFilter = new Tone.Filter(2200, "lowpass").connect(chordVol);
+  melodyFilter = new Tone.Filter(3200, "lowpass").connect(melodyVol);
+  hatFilter = new Tone.Filter(8500, "lowpass").connect(drumVol);
+
   chordSynth = new Tone.PolySynth(Tone.Synth, {
     oscillator:{ type:"triangle" },
-    envelope:{ attack:0.02, decay:0.25, sustain:0.55, release:0.6 }
-  }).connect(chordVol);
-  chordSynth.set({ volume:-6 });
+    envelope:{ attack:0.02, decay:0.25, sustain:0.55, release:0.5 }
+  }).connect(chordFilter);
+  chordSynth.set({ volume:-11 });
 
   melodySynth = new Tone.Synth({
     oscillator:{ type:"sawtooth" },
-    envelope:{ attack:0.006, decay:0.12, sustain:0.4, release:0.18 }
-  }).connect(melodyVol);
-  melodySynth.set({ volume:-4 });
+    envelope:{ attack:0.006, decay:0.12, sustain:0.4, release:0.15 }
+  }).connect(melodyFilter);
+  melodySynth.set({ volume:-9 });
 
   drumSynths.kick = new Tone.MembraneSynth({ pitchDecay:0.045, octaves:6, envelope:{attack:0.001,decay:0.35,sustain:0} }).connect(drumVol);
-  drumSynths.snare = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.16,sustain:0} }).connect(drumVol);
-  drumSynths.hatClosed = new Tone.MetalSynth({ envelope:{attack:0.001,decay:0.06,release:0.01}, harmonicity:5.1, resonance:4000, octaves:1.2 }).connect(drumVol);
-  drumSynths.hatOpen = new Tone.MetalSynth({ envelope:{attack:0.001,decay:0.35,release:0.05}, harmonicity:5.1, resonance:3500, octaves:1.5 }).connect(drumVol);
+  drumSynths.kick.volume.value = -2;
+  drumSynths.snare = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.14,sustain:0} }).connect(drumVol);
+  drumSynths.snare.volume.value = -8;
+  drumSynths.hatClosed = new Tone.MetalSynth({ envelope:{attack:0.001,decay:0.05,release:0.01}, harmonicity:3.4, resonance:2800, octaves:1.0 }).connect(hatFilter);
+  drumSynths.hatClosed.volume.value = -16;
+  drumSynths.hatOpen = new Tone.MetalSynth({ envelope:{attack:0.001,decay:0.28,release:0.04}, harmonicity:3.4, resonance:2400, octaves:1.2 }).connect(hatFilter);
+  drumSynths.hatOpen.volume.value = -16;
   drumSynths.perc = new Tone.MembraneSynth({ pitchDecay:0.02, octaves:3, envelope:{attack:0.001,decay:0.2,sustain:0} }).connect(drumVol);
+  drumSynths.perc.volume.value = -9;
+}
+
+/* Immediately silences every currently-sounding voice (releases the synths'
+   own envelopes AND hard-mutes the output gate for ~40ms) so Stop/Pause take
+   effect at once instead of waiting out each note's natural release tail. */
+function panicSilence(){
+  if(!state.audioReady) return;
+  const now = Tone.now();
+  try{ chordSynth.releaseAll(now); }catch(e){}
+  [melodySynth, drumSynths.kick, drumSynths.snare, drumSynths.hatClosed, drumSynths.hatOpen, drumSynths.perc].forEach(s=>{
+    if(!s) return;
+    try{ s.triggerRelease(now); }catch(e){}
+  });
+  if(panicGain){
+    panicGain.gain.cancelScheduledValues(now);
+    panicGain.gain.setValueAtTime(panicGain.gain.value, now);
+    panicGain.gain.linearRampToValueAtTime(0.0001, now+0.03);
+    panicGain.gain.setValueAtTime(1, now+0.07); // silently rearm for next Play
+  }
 }
 function pctToDb(pct){
   if(pct<=0) return -Infinity;
@@ -1409,10 +1592,12 @@ document.getElementById("btnPlay").addEventListener("click", ()=>{
 });
 document.getElementById("btnPause").addEventListener("click", ()=>{
   Tone.Transport.pause();
+  panicSilence();
   state.playing = false;
 });
 document.getElementById("btnStop").addEventListener("click", ()=>{
   Tone.Transport.stop();
+  panicSilence();
   state.playing = false;
   playheadBeat = -1;
   renderGrid();
