@@ -1124,21 +1124,25 @@ function buildAudioGraph(){
 
 function panicSilence(){
   if(!state.audioReady) return;
-  // Cancel all scheduled events immediately
-  Tone.Transport.cancel(0);
-  // Dispose existing parts so their callbacks can't fire
-  [chordPart, melodyPart, drumPart].forEach(p=>{ if(p){ p.stop(); p.dispose(); } });
+  // Stop and dispose all parts so their callbacks can't fire
+  [chordPart, melodyPart, drumPart].forEach(p=>{
+    if(p){ try{ p.stop(); }catch(e){} try{ p.dispose(); }catch(e){} }
+  });
   chordPart = null; melodyPart = null; drumPart = null;
+  // Release all sounding voices
   const now = Tone.now();
   try{ chordSynth.releaseAll(now); }catch(e){}
   [melodySynth, drumSynths.kick, drumSynths.snare, drumSynths.hatClosed, drumSynths.hatOpen, drumSynths.perc].forEach(s=>{
     if(!s) return;
     try{ s.triggerRelease(now); }catch(e){}
   });
+  // Hard mute for 80ms to kill any release tails, then rearm
   if(panicGain){
-    panicGain.gain.cancelScheduledValues(now);
-    panicGain.gain.setValueAtTime(0.0001, now);
-    panicGain.gain.setValueAtTime(1, now+0.08);
+    try{
+      panicGain.gain.cancelScheduledValues(now);
+      panicGain.gain.setValueAtTime(0.0001, now);
+      panicGain.gain.setValueAtTime(1, now+0.08);
+    }catch(e){}
   }
 }
 
@@ -1231,47 +1235,49 @@ function exportMidi(){
 // ============================================================
 // UI WIRING
 // ============================================================
-// Auto-activate audio on first user interaction (no splash screen)
-let audioActivated = false;
-async function autoActivateAudio(){
-  if(audioActivated) return;
-  audioActivated = true;
-  try{
-    await Tone.start();
-    buildAudioGraph();
-    state.audioReady = true;
-    document.getElementById("audioDot").classList.add("live");
-    document.getElementById("audioStatusText").textContent = "Audio ready";
-    Tone.Transport.swing = state.swing/100;
-    Tone.Transport.swingSubdivision = "8n";
-    if(state.chords.length) rebuildParts();
-  }catch(e){ audioActivated = false; }
-}
-document.addEventListener("pointerdown", autoActivateAudio, {once:false});
-document.addEventListener("keydown", autoActivateAudio, {once:false});
-
+// Audio activation happens directly in the Play button handler.
+// No document-level listeners, no race conditions.
 document.getElementById("btnPlay").addEventListener("click", async ()=>{
-  if(!state.audioReady) await autoActivateAudio();
-  if(!state.audioReady) return;
-  if(!state.chords.length){ alert("Generate a composition first."); return; }
+  // Step 1: Activate audio if not yet done (must be in user gesture)
+  if(!state.audioReady){
+    try{
+      await Tone.start();
+      buildAudioGraph();
+      state.audioReady = true;
+      document.getElementById("audioDot").classList.add("live");
+      document.getElementById("audioStatusText").textContent = "Audio ready";
+      Tone.Transport.swing = state.swing/100;
+      Tone.Transport.swingSubdivision = "8n";
+    }catch(e){
+      alert("Audio could not start: " + e.message);
+      return;
+    }
+  }
+  // Step 2: Need chords to play
+  if(!state.chords.length){
+    alert("Click Generate first.");
+    return;
+  }
+  // Step 3: Build parts if needed
   if(!chordPart) rebuildParts();
   if(!chordPart) return;
+  // Step 4: Play
   Tone.Transport.start();
   state.playing = true;
   startPlayheadTracking();
 });
 document.getElementById("btnPause").addEventListener("click", ()=>{
-  Tone.Transport.pause();
+  if(!state.audioReady || !state.playing) return;
+  try{ Tone.Transport.pause(); }catch(e){}
   state.playing = false;
   panicSilence();
 });
 document.getElementById("btnStop").addEventListener("click", ()=>{
-  Tone.Transport.stop();
+  if(!state.audioReady) return;
+  try{ Tone.Transport.stop(); }catch(e){}
   state.playing = false;
   playheadBeat = -1;
   panicSilence();
-  // Rebuild parts for next play
-  if(state.chords.length) rebuildParts();
   renderGrid();
 });
 
@@ -1345,8 +1351,27 @@ document.getElementById("selectStyle").addEventListener("change", e=>{
   }
 });
 
-document.getElementById("btnGenerate").addEventListener("click", runGenerate);
-document.getElementById("btnRegenerate").addEventListener("click", runRegenerate);
+document.getElementById("btnGenerate").addEventListener("click", ()=>{
+  try{
+    runGenerate();
+    // Brief visual feedback
+    const btn = document.getElementById("btnGenerate");
+    const orig = btn.textContent;
+    btn.textContent = "✓ Generated";
+    btn.style.background = "#4FBF7A";
+    setTimeout(()=>{ btn.textContent = orig; btn.style.background = ""; }, 800);
+  }catch(e){ alert("Generate failed: " + e.message); }
+});
+document.getElementById("btnRegenerate").addEventListener("click", ()=>{
+  try{
+    runRegenerate();
+    const btn = document.getElementById("btnRegenerate");
+    const orig = btn.textContent;
+    btn.textContent = "✓ Regenerated";
+    btn.style.background = "#4FBF7A";
+    setTimeout(()=>{ btn.textContent = orig; btn.style.background = ""; }, 800);
+  }catch(e){ alert("Regenerate failed: " + e.message); }
+});
 document.getElementById("btnExport").addEventListener("click", exportMidi);
 
 // Mute buttons
@@ -1361,6 +1386,10 @@ document.querySelectorAll(".mute-btn").forEach(btn=>{
 
 // Init
 function init(){
+  if(typeof Tone === "undefined"){
+    document.getElementById("audioStatusText").textContent = "Error: Tone.js not loaded";
+    document.getElementById("audioStatusText").style.color = "#D9634D";
+  }
   document.getElementById("selectStyle").dispatchEvent(new Event("change"));
   renderGrid();
 }
