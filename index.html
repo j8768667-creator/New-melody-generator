@@ -100,6 +100,13 @@
   .readout-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
   .readout-cell{ padding:10px; }
 
+  .chord-row{
+    display:flex; align-items:center; gap:8px; background:var(--panel); border:1px solid var(--border);
+    border-radius:5px; padding:4px 4px 4px 10px; min-height:44px;
+  }
+  .chord-row .chord-name{ font-family:var(--mono); font-size:12.5px; font-weight:700; color:var(--lane-chord); min-width:44px; }
+  .chord-row select{ height:36px; font-size:11.5px; padding:0 6px; min-height:36px; }
+
   ::-webkit-scrollbar{ height:8px; width:8px; }
   ::-webkit-scrollbar-thumb{ background:#333844; border-radius:4px; }
   ::-webkit-scrollbar-track{ background:transparent; }
@@ -231,8 +238,11 @@
           <div id="outTs" class="val">—</div>
         </div>
         <div class="panel-2 readout-cell col-span-3">
-          <div class="lbl">Chord Timeline</div>
-          <div id="outChords" class="val" style="word-break:break-word;">—</div>
+          <div class="flex items-center justify-between mb-1.5">
+            <span class="lbl">Chord Timeline — Length Per Chord</span>
+            <span class="mono text-[10px]" style="color:var(--text-faint)">Auto-fills track length, no gaps</span>
+          </div>
+          <div id="chordListEditor" class="flex flex-wrap gap-2">—</div>
         </div>
       </div>
     </section>
@@ -1127,9 +1137,96 @@ function updateAnalysisReadout(){
   document.getElementById("outKey").textContent = state.key || "—";
   document.getElementById("outBpm").textContent = state.bpm + " BPM";
   document.getElementById("outTs").textContent = state.ts.num + "/" + state.ts.den;
-  document.getElementById("outChords").textContent = state.chords.length
-    ? state.chords.map(c=>chordLabel(c)).join("  ·  ")
-    : "No chords analyzed yet.";
+  renderChordList();
+}
+
+/* ---- Editable chord-length list (half/1/1.5/2 bar presets) ----
+   This is the reliable way to resize a chord: pick a value, it snaps in
+   exactly and the rest of the timeline re-tiles around it with no gaps or
+   overlaps. Free-drag on the grid still works for fine adjustment but this
+   is the precise path. */
+const LENGTH_OPTIONS = [
+  { bars:0.5, label:"½ bar" },
+  { bars:1,   label:"1 bar" },
+  { bars:1.5, label:"1½ bar" },
+  { bars:2,   label:"2 bar" }
+];
+function nearestLenOptionIdx(lengthBeats){
+  const bars = lengthBeats / beatsPerBar();
+  let best=1, bd=Infinity;
+  LENGTH_OPTIONS.forEach((o,i)=>{ const d=Math.abs(o.bars-bars); if(d<bd){ bd=d; best=i; } });
+  return best;
+}
+function renderChordList(){
+  const container = document.getElementById("chordListEditor");
+  if(!container) return;
+  if(!state.chords.length){ container.textContent = "No chords analyzed yet."; return; }
+  container.innerHTML = "";
+  state.chords.forEach((c,i)=>{
+    const row = document.createElement("div");
+    row.className = "chord-row";
+    const nameEl = document.createElement("span");
+    nameEl.className = "chord-name";
+    nameEl.textContent = chordLabel(c);
+    const sel = document.createElement("select");
+    LENGTH_OPTIONS.forEach(o=>{
+      const opt = document.createElement("option");
+      opt.value = String(o.bars);
+      opt.textContent = o.label;
+      sel.appendChild(opt);
+    });
+    sel.selectedIndex = nearestLenOptionIdx(c.lengthBeats);
+    sel.addEventListener("change", ()=> setChordBars(i, parseFloat(sel.value)));
+    row.appendChild(nameEl);
+    row.appendChild(sel);
+    container.appendChild(row);
+  });
+}
+function setChordBars(index, bars){
+  if(!state.chords[index]) return;
+  state.chords[index].lengthBeats = bars * beatsPerBar();
+  reflowChords();
+  renderChordList();
+  updateAnalysisReadout();
+  renderGrid();
+  rebuildParts();
+}
+/* Recomputes every chord's startBeat from its length (in array order), then
+   re-tiles the tail — truncating cleanly at the bar boundary if the edited
+   lengths now overshoot the track, or looping the sequence to pad it out if
+   they now fall short — so the timeline always covers exactly totalBeats()
+   with no gaps and no overlaps. Note: this only ever touches chord
+   start/length. It never rescales melody/drum note timing, so edits here
+   don't change playback tempo or note density (see onPointerMove). */
+function reflowChords(){
+  if(!state.chords.length) return;
+  const total = totalBeats();
+  let t = 0;
+  state.chords.forEach(c=>{ c.startBeat = t; t += c.lengthBeats; });
+
+  if(t > total + 1e-6){
+    const kept = [];
+    let acc = 0;
+    for(const c of state.chords){
+      if(acc >= total - 1e-6) break;
+      let len = c.lengthBeats;
+      if(acc + len > total) len = total - acc;
+      if(len <= 1e-6) break;
+      kept.push({ root:c.root, quality:c.quality, startBeat:acc, lengthBeats:len });
+      acc += len;
+    }
+    state.chords = kept;
+  } else if(t < total - 1e-6){
+    const template = state.chords.map(c=>({ root:c.root, quality:c.quality, lengthBeats:c.lengthBeats }));
+    let acc = t, i = 0, guard = 0;
+    while(acc < total - 1e-6 && guard < 4000){
+      const src = template[i % template.length];
+      let len = src.lengthBeats;
+      if(acc + len > total) len = total - acc;
+      state.chords.push({ root:src.root, quality:src.quality, startBeat:acc, lengthBeats:len });
+      acc += len; i++; guard++;
+    }
+  }
 }
 
 /* ============================================================
@@ -1342,23 +1439,22 @@ function onPointerMove(evt){
   let newBoundaryBeat = pos.x / PX_PER_BEAT;
   const left = dragState.leftStart;
   const rightEnd = state.chords[dragState.idx+1].startBeat + dragState.origRightLen;
+  // Snap to half-bar increments — matches the list-editor's presets and
+  // keeps the boundary predictable instead of landing on an arbitrary beat.
+  const snapUnit = beatsPerBar()/2;
+  newBoundaryBeat = Math.round(newBoundaryBeat/snapUnit) * snapUnit;
   newBoundaryBeat = clamp(newBoundaryBeat, left+dragState.minLen, rightEnd-dragState.minLen);
-
-  const newLeftLen = newBoundaryBeat - left;
-  const newRightStart = newBoundaryBeat;
-  const newRightLen = rightEnd - newBoundaryBeat;
 
   const chordL = state.chords[dragState.idx];
   const chordR = state.chords[dragState.idx+1];
 
-  rescaleEventsInRange(state.melody, chordL.startBeat, chordL.startBeat+chordL.lengthBeats, chordL.startBeat, chordL.startBeat+newLeftLen);
-  rescaleEventsInRange(state.melody, chordR.startBeat, chordR.startBeat+chordR.lengthBeats, newRightStart, newRightStart+newRightLen);
-  rescaleEventsInRange(state.drums, chordL.startBeat, chordL.startBeat+chordL.lengthBeats, chordL.startBeat, chordL.startBeat+newLeftLen);
-  rescaleEventsInRange(state.drums, chordR.startBeat, chordR.startBeat+chordR.lengthBeats, newRightStart, newRightStart+newRightLen);
-
-  chordL.lengthBeats = newLeftLen;
-  chordR.startBeat = newRightStart;
-  chordR.lengthBeats = newRightLen;
+  // Chord boundaries only move the chord data — melody/drum note timing is
+  // left untouched, so shortening a chord no longer speeds up (or slows
+  // down) the notes that fall inside it. Regenerate afterwards to re-align
+  // the melody/drums harmonically to the new chord layout.
+  chordL.lengthBeats = newBoundaryBeat - left;
+  chordR.startBeat = newBoundaryBeat;
+  chordR.lengthBeats = rightEnd - newBoundaryBeat;
 
   requestAnimationFrame(renderGrid);
 }
@@ -1368,22 +1464,12 @@ function onPointerUp(evt){
       try{ canvas.releasePointerCapture(evt.pointerId); }catch(e){}
     }
     dragState=null;
+    reflowChords();
+    renderChordList();
     rebuildParts();
     updateAnalysisReadout();
     renderGrid();
   }
-}
-function rescaleEventsInRange(events, oldStart, oldEnd, newStart, newEnd){
-  const oldSpan = Math.max(1e-6, oldEnd-oldStart);
-  const newSpan = Math.max(1e-6, newEnd-newStart);
-  const scale = newSpan/oldSpan;
-  events.forEach(e=>{
-    if(e.startBeat >= oldStart-1e-6 && e.startBeat < oldEnd+1e-6){
-      const rel = e.startBeat - oldStart;
-      e.startBeat = newStart + rel*scale;
-      if(e.lengthBeats) e.lengthBeats *= scale;
-    }
-  });
 }
 // Pointer Events alone cover mouse, touch and pen on iPadOS Safari — adding a
 // parallel touch-event listener set caused each drag frame to be processed
