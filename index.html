@@ -77,7 +77,7 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#1a1305;
     </div>
     <div class="flex items-center gap-2 flex-wrap">
       <div id="audioStatus" class="flex items-center gap-2 mono text-[11px] px-2" style="color:var(--text-dim)">
-        <span id="audioDot" class="pulse-dot"></span><span id="audioStatusText">Audio locked</span>
+        <span id="audioDot" class="pulse-dot"></span><span id="audioStatusText">Tap Play to start audio</span>
       </div>
     </div>
   </header>
@@ -86,9 +86,9 @@ input[type="file"]::file-selector-button{background:var(--accent);color:#1a1305;
   <section class="panel p-3 mb-4">
     <div class="flex flex-wrap items-center gap-3">
       <div class="flex items-center gap-1.5">
-        <button id="btnPlay" class="btn" disabled>▶</button>
-        <button id="btnPause" class="btn" disabled>❚❚</button>
-        <button id="btnStop" class="btn" disabled>■</button>
+        <button id="btnPlay" class="btn">▶</button>
+        <button id="btnPause" class="btn">❚❚</button>
+        <button id="btnStop" class="btn">■</button>
       </div>
       <div class="h-8 w-px" style="background:var(--border)"></div>
       <div class="flex flex-col justify-center min-w-[86px]">
@@ -1242,7 +1242,6 @@ async function autoActivateAudio(){
     state.audioReady = true;
     document.getElementById("audioDot").classList.add("live");
     document.getElementById("audioStatusText").textContent = "Audio ready";
-    ["btnPlay","btnPause","btnStop"].forEach(id=>document.getElementById(id).disabled=false);
     Tone.Transport.swing = state.swing/100;
     Tone.Transport.swingSubdivision = "8n";
     if(state.chords.length) rebuildParts();
