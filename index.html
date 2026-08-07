@@ -1496,51 +1496,54 @@ function buildAudioGraph(){
   // Master chain: per-lane volume -> master volume -> glue compressor (keeps
   // simultaneous hits from piling up into a hot peak) -> panic gate (instant
   // silence on stop/pause) -> brick-wall limiter (final safety net against
-  // clipping) -> speakers.
+  // clipping) -> speakers. The compressor+limiter give enough headroom
+  // protection that instrument levels below can sit at a normal loudness
+  // instead of being turned down defensively.
   limiter = new Tone.Limiter(-1).toDestination();
   panicGain = new Tone.Gain(1).connect(limiter);
-  compressor = new Tone.Compressor({ threshold:-18, ratio:3.5, attack:0.004, release:0.2 }).connect(panicGain);
+  compressor = new Tone.Compressor({ threshold:-16, ratio:3, attack:0.004, release:0.2 }).connect(panicGain);
   masterVol = new Tone.Volume(pctToDb(state.masterVolPct)).connect(compressor);
   chordVol = new Tone.Volume(0).connect(masterVol);
   melodyVol = new Tone.Volume(0).connect(masterVol);
   drumVol = new Tone.Volume(0).connect(masterVol);
 
-  // Gentle lowpass filters tame the harsh upper harmonics of the raw
-  // waveforms/noise sources so playback doesn't read as shrill/tinny,
-  // especially on small iPad speakers.
-  chordFilter = new Tone.Filter(2000, "lowpass", -24).connect(chordVol);
-  melodyFilter = new Tone.Filter(2600, "lowpass", -24).connect(melodyVol);
-  hatClosedFilter = new Tone.Filter({ type:"bandpass", frequency:8200, Q:0.7 }).connect(drumVol);
-  hatOpenFilter = new Tone.Filter({ type:"bandpass", frequency:7200, Q:0.6 }).connect(drumVol);
+  // Lowpass/bandpass filters take the harsh top-end edge off the raw
+  // waveforms/noise sources without dulling them — cutoffs sit well above
+  // the fundamentals so the sound keeps presence and definition.
+  chordFilter = new Tone.Filter(4200, "lowpass", -12).connect(chordVol);
+  melodyFilter = new Tone.Filter(6000, "lowpass", -12).connect(melodyVol);
+  hatClosedFilter = new Tone.Filter({ type:"bandpass", frequency:8500, Q:0.6 }).connect(drumVol);
+  hatOpenFilter = new Tone.Filter({ type:"bandpass", frequency:7500, Q:0.5 }).connect(drumVol);
 
   chordSynth = new Tone.PolySynth(Tone.Synth, {
     oscillator:{ type:"triangle" },
     envelope:{ attack:0.02, decay:0.25, sustain:0.5, release:0.45 }
   }).connect(chordFilter);
-  chordSynth.set({ volume:-14 });
+  chordSynth.set({ volume:-7 });
 
   // MonoSynth gives melody a shaped, closing filter envelope instead of a raw
-  // sawtooth blasting full-bandwidth on every note — much less shrill.
+  // sawtooth blasting full-bandwidth on every note — much less shrill, but
+  // still bright and up-front in the mix.
   melodySynth = new Tone.MonoSynth({
     oscillator:{ type:"sawtooth" },
     envelope:{ attack:0.006, decay:0.14, sustain:0.35, release:0.12 },
     filter:{ type:"lowpass", rolloff:-24, Q:1 },
-    filterEnvelope:{ attack:0.008, decay:0.2, sustain:0.25, release:0.15, baseFrequency:400, octaves:3.2 }
+    filterEnvelope:{ attack:0.008, decay:0.2, sustain:0.3, release:0.15, baseFrequency:600, octaves:4 }
   }).connect(melodyFilter);
-  melodySynth.set({ volume:-11 });
+  melodySynth.set({ volume:-4 });
 
   drumSynths.kick = new Tone.MembraneSynth({ pitchDecay:0.045, octaves:6, envelope:{attack:0.001,decay:0.35,sustain:0} }).connect(drumVol);
-  drumSynths.kick.volume.value = -5;
+  drumSynths.kick.volume.value = -2;
   drumSynths.snare = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.13,sustain:0} }).connect(drumVol);
-  drumSynths.snare.volume.value = -12;
+  drumSynths.snare.volume.value = -6;
   // Filtered noise instead of MetalSynth: a realistic hat sound rather than
   // the piercing bell-like clang MetalSynth produces at full bandwidth.
   drumSynths.hatClosed = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.045,sustain:0} }).connect(hatClosedFilter);
-  drumSynths.hatClosed.volume.value = -20;
+  drumSynths.hatClosed.volume.value = -13;
   drumSynths.hatOpen = new Tone.NoiseSynth({ noise:{type:"white"}, envelope:{attack:0.001,decay:0.22,sustain:0} }).connect(hatOpenFilter);
-  drumSynths.hatOpen.volume.value = -20;
+  drumSynths.hatOpen.volume.value = -13;
   drumSynths.perc = new Tone.MembraneSynth({ pitchDecay:0.02, octaves:3, envelope:{attack:0.001,decay:0.2,sustain:0} }).connect(drumVol);
-  drumSynths.perc.volume.value = -12;
+  drumSynths.perc.volume.value = -6;
 }
 
 /* Immediately silences every currently-sounding voice (releases the synths'
@@ -1563,7 +1566,7 @@ function panicSilence(){
 }
 function pctToDb(pct){
   if(pct<=0) return -Infinity;
-  return -40 + (pct/100)*37; // ceiling of -3dB at 100% leaves headroom for the limiter
+  return -24 + (pct/100)*23; // ceiling of -1dB at 100%, -24dB floor at 1% — moderate default loudness
 }
 
 function rebuildParts(){
